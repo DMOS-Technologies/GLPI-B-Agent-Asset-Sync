@@ -4,6 +4,7 @@ namespace AssetSyncAgent;
 
 use Entity;
 use Glpi\Api\APIRest;
+use Glpi\Search\SearchOption;
 use GLPIKey;
 use JsonException;
 use Profile;
@@ -18,6 +19,8 @@ require_once __DIR__ . '/SyncException.php';
 final class Request extends APIRest
 {
     private const MAX_BODY_BYTES = 1048576;
+    private const MAX_BATCH_BODY_BYTES = 16777216;
+    private const MAX_BATCH_ASSETS = 100;
 
     public static function respond(): JsonResponse
     {
@@ -51,6 +54,10 @@ final class Request extends APIRest
             $request = new self();
             $request->authenticate();
             $body = self::readJson();
+            if (($body['operation'] ?? null) === 'batch')
+            {
+                return new JsonResponse($request->batch($body), headers: ['Cache-Control' => 'no-store']);
+            }
             $request->selectEntity($body['entity_id'] ?? null);
             $includeErrorDetails = ($body['include_error_details'] ?? false) === true;
 
@@ -78,6 +85,68 @@ final class Request extends APIRest
             }
             restore_error_handler();
         }
+    }
+
+    private function batch(array $body): array
+    {
+        $items = $body['requests'] ?? null;
+        if (!is_array($items) || !array_is_list($items) || $items === [] || count($items) > self::MAX_BATCH_ASSETS)
+        {
+            throw new SyncException('invalid_request', 400);
+        }
+
+        // Validate the entire set of correlation IDs before anything can be written.
+        $ids = [];
+        foreach ($items as $item)
+        {
+            $id = is_array($item) ? ($item['c_id'] ?? null) : null;
+            if (!is_int($id) || $id < 1 || isset($ids[$id]))
+            {
+                throw new SyncException('invalid_request', 400);
+            }
+            $ids[$id] = true;
+        }
+
+        require_once __DIR__ . '/Sync.php';
+        $session = $_SESSION;
+        $results = [];
+        foreach ($items as $item)
+        {
+            $result = ['c_id' => $item['c_id']];
+            try
+            {
+                if (!in_array($item['operation'] ?? null, ['probe', 'apply'], true))
+                {
+                    throw new SyncException('invalid_request', 400);
+                }
+                $this->selectEntity($item['entity_id'] ?? null);
+                if (is_string($item['itemtype'] ?? null))
+                {
+                    // Search options can depend on the scope selected for the previous item.
+                    SearchOption::clearSearchOptionCache($item['itemtype']);
+                }
+                $result += Sync::handle($item);
+            }
+            catch (SyncException $exception)
+            {
+                $result += ['ok' => false, 'error' => $exception->getMessage()];
+                if (($item['include_error_details'] ?? false) === true && $exception->getFieldId() !== null)
+                {
+                    $result['field_id'] = $exception->getFieldId();
+                }
+            }
+            catch (Throwable)
+            {
+                // Each asset has its own transaction. An unexpected failure must not stop other assets.
+                $result += ['ok' => false, 'error' => 'internal_error'];
+            }
+            finally
+            {
+                $_SESSION = $session;
+            }
+            $results[] = $result;
+        }
+        return ['ok' => true, 'results' => $results];
     }
 
     private static function isOtherPluginFile(string $file): bool
@@ -226,12 +295,12 @@ final class Request extends APIRest
         {
             throw new SyncException('unsupported_media_type', 415);
         }
-        $json = file_get_contents('php://input', length: self::MAX_BODY_BYTES + 1);
+        $json = file_get_contents('php://input', length: self::MAX_BATCH_BODY_BYTES + 1);
         if ($json === false)
         {
             throw new SyncException('invalid_request', 400);
         }
-        if (strlen($json) > self::MAX_BODY_BYTES)
+        if (strlen($json) > self::MAX_BATCH_BODY_BYTES)
         {
             throw new SyncException('request_too_large', 413);
         }
@@ -246,6 +315,10 @@ final class Request extends APIRest
         if (!is_array($body) || array_is_list($body))
         {
             throw new SyncException('invalid_request', 400);
+        }
+        if (($body['operation'] ?? null) !== 'batch' && strlen($json) > self::MAX_BODY_BYTES)
+        {
+            throw new SyncException('request_too_large', 413);
         }
         return $body;
     }
