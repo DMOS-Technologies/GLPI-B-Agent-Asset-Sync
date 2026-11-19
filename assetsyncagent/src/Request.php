@@ -23,14 +23,22 @@ final class Request extends APIRest
     {
         $includeErrorDetails = false;
         // GLPI database warnings can contain SQL and submitted values.
-        set_error_handler(static function (int $severity): bool
+        set_error_handler(static function (int $severity, string $message, string $file): bool
         {
-            if ((error_reporting() & $severity) !== 0
-                && ($severity & (E_WARNING | E_USER_WARNING | E_RECOVERABLE_ERROR | E_USER_ERROR)) !== 0)
+            if ((error_reporting() & $severity) === 0
+                || ($severity & (E_WARNING | E_USER_WARNING | E_RECOVERABLE_ERROR | E_USER_ERROR)) === 0)
             {
-                throw new RuntimeException('GLPI operation failed');
+                return true;
             }
-            return true;
+
+            // PHP keeps the first constant value. A duplicate in another plugin can be skipped.
+            if ($severity === E_WARNING && str_starts_with($message, 'Constant ')
+                && str_ends_with($message, ' already defined') && self::isOtherPluginFile($file))
+            {
+                return true;
+            }
+
+            throw new RuntimeException('GLPI operation failed');
         });
 
         try
@@ -70,6 +78,26 @@ final class Request extends APIRest
             }
             restore_error_handler();
         }
+    }
+
+    private static function isOtherPluginFile(string $file): bool
+    {
+        if (str_starts_with($file, dirname(__DIR__) . DIRECTORY_SEPARATOR))
+        {
+            return false;
+        }
+
+        // GLPI includes both manually installed and Marketplace plugins in these directories.
+        foreach (GLPI_PLUGINS_DIRECTORIES as $directory)
+        {
+            $pluginRoot = realpath($directory);
+            if ($pluginRoot !== false && str_starts_with($file, rtrim($pluginRoot, DIRECTORY_SEPARATOR) . DIRECTORY_SEPARATOR))
+            {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     private function authenticate(): void
