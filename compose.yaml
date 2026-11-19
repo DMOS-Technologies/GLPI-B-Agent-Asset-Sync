@@ -1,0 +1,51 @@
+name: glpi-b
+
+services:
+  glpi:
+    image: glpi/glpi:11.0.8
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1:8081:80"
+    networks:
+      default:
+      asset_sync:
+        ipv4_address: 172.30.250.3
+    environment:
+      GLPI_DB_HOST: db
+      GLPI_DB_PORT: "3306"
+      GLPI_DB_NAME: glpi
+      GLPI_DB_USER: glpi
+      GLPI_DB_PASSWORD: ${GLPI_B_DB_PASSWORD:?Set GLPI_B_DB_PASSWORD in .env}
+    volumes:
+      - glpi_data:/var/glpi
+      - ./assetsyncagent:/var/www/glpi/plugins/assetsyncagent:ro
+      - ./apache-glpi.conf:/etc/apache2/sites-available/000-default.conf:ro
+
+  db:
+    image: mariadb:11.4
+    restart: unless-stopped
+    environment:
+      MARIADB_RANDOM_ROOT_PASSWORD: "1"
+      MARIADB_DATABASE: glpi
+      MARIADB_USER: glpi
+      MARIADB_PASSWORD: ${GLPI_B_DB_PASSWORD:?Set GLPI_B_DB_PASSWORD in .env}
+    healthcheck:
+      test: ["CMD", "healthcheck.sh", "--connect", "--innodb_initialized"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
+    volumes:
+      - db_data:/var/lib/mysql
+
+volumes:
+  glpi_data:
+  db_data:
+
+networks:
+  asset_sync:
+    name: glpi-asset-sync
+    external: true
