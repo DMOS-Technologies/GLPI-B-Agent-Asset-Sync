@@ -1,6 +1,6 @@
-# Asset Sync Agent
+# DMOS AssetSync - Slave
 
-Asset Sync Controller A uses GLPI 11's legacy REST API for discovery and session management. The Agent's CLI setup provisions a dedicated API client and account. The initial profile has zero resource permissions and access to the Root entity without recursion. Controller A owns the routes, scheduling, status, and Last contact timestamp.
+DMOS AssetSync - Master uses GLPI 11's legacy REST API for discovery and session management. The Agent's CLI setup provisions a dedicated API client and account. The initial profile has zero resource permissions and access to the Root entity without recursion. Controller A owns the routes, scheduling, status, and Last contact timestamp.
 
 ## Local Docker Desktop
 
@@ -30,7 +30,7 @@ Send the Application Token in the `App-Token` header. For `GET /initSession`, se
 
 ## Route discovery
 
-On GLPI A, open **Setup → Asset Sync Controller → Routes → Add route**, select the saved GLPI B connection, and click **Load route options**. The Controller uses the saved credentials for discovery and validates the selected options again when a user saves the route. Both actions run on demand.
+On GLPI A, open **Setup → DMOS AssetSync - Master → Routes → Add route**, select the saved GLPI B connection, and click **Load route options**. The Controller uses the saved credentials for discovery and validates the selected options again when a user saves the route. Both actions run on demand.
 
 1. Open a session with `GET /initSession`.
 2. Read the active profile's entity IDs and names with `GET /getMyEntities?is_recursive=1`. Keep entity ID `0` when it is returned. On this instance, GLPI B names its root entity `BSJV`.

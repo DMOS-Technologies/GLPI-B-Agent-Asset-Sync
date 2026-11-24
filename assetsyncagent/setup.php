@@ -23,8 +23,8 @@ function plugin_init_assetsyncagent(): void
 function plugin_version_assetsyncagent(): array
 {
     return [
-        'name' => 'Asset Sync Agent',
-        'version' => '0.0.6',
+        'name' => 'DMOS AssetSync - Slave',
+        'version' => '0.0.7',
         'requirements' => [
             'glpi' => [
                 'min' => '11.0.0',
