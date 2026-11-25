@@ -20,14 +20,7 @@ final class Values
         $kind = self::kind($field);
         if ($kind === 'dropdown' || $kind === 'dropdown_list')
         {
-            try
-            {
-                return self::encodeDropdown($field, $kind, $value, $entityId);
-            }
-            catch (SyncException $error)
-            {
-                throw $error->forDropdown($field['id'] ?? null);
-            }
+            return self::encodeDropdown($field, $kind, $value, $entityId);
         }
         if ($kind === 'item')
         {
@@ -50,14 +43,7 @@ final class Values
         $kind = self::kind($field);
         if ($kind === 'dropdown' || $kind === 'dropdown_list')
         {
-            try
-            {
-                $value = self::decodeDropdown($field, $kind, $value, $entityId);
-            }
-            catch (SyncException $error)
-            {
-                throw $error->forDropdown($field['id'] ?? null);
-            }
+            $value = self::decodeDropdown($field, $kind, $value, $entityId);
         }
         elseif ($kind === 'item')
         {
@@ -95,7 +81,8 @@ final class Values
             $boolean = match (strtolower(trim(self::text($value)))) {
                 'yes', 'true', 'on', '1' => true,
                 'no', 'false', 'off', '0' => false,
-                default => throw new SyncException('invalid_field_value', 422),
+                default => throw (new SyncException('invalid_field_value', 422))
+                    ->because('This field expects a Yes/No value.'),
             };
             return $writing ? (int) $boolean : $boolean;
         }
@@ -109,7 +96,8 @@ final class Values
             $integer = filter_var($number, FILTER_VALIDATE_INT);
             if ($integer === false)
             {
-                throw new SyncException('invalid_field_value', 422);
+                throw (new SyncException('invalid_field_value', 422))
+                    ->because('This field expects a whole number within the supported range.');
             }
             return $integer;
         }
@@ -123,7 +111,8 @@ final class Values
             && (!filter_var($text, FILTER_VALIDATE_URL)
                 || !in_array(strtolower((string) parse_url($text, PHP_URL_SCHEME)), ['http', 'https', 'ftp'], true)))
         {
-            throw new SyncException('invalid_field_value', 422);
+            throw (new SyncException('invalid_field_value', 422))
+                ->because('This field expects a valid HTTP, HTTPS, or FTP URL.');
         }
         if ($writing && in_array($field['kind'], ['richtext', 'rich_text'], true))
         {
@@ -152,12 +141,14 @@ final class Values
             {
                 if (!is_string($label))
                 {
-                    throw new SyncException('invalid_field_value', 422);
+                    throw (new SyncException('invalid_field_value', 422))
+                        ->because('Every entry in the list must be text.');
                 }
             }
             return implode(', ', $value);
         }
-        throw new SyncException('invalid_field_value', 422);
+        throw (new SyncException('invalid_field_value', 422))
+            ->because('The value could not be read as text.');
     }
 
     private static function decimal(mixed $value): string
@@ -171,7 +162,7 @@ final class Values
         if (!is_string($input) || !preg_match('/\A([+-]?)(\d*)(?:\.(\d*))?(?:[eE]([+-]?\d{1,4}))?\z/', $input, $parts)
             || ($parts[2] === '' && ($parts[3] ?? '') === ''))
         {
-            throw new SyncException('invalid_field_value', 422);
+            throw (new SyncException('invalid_field_value', 422))->because('This field expects a valid number.');
         }
 
         $digits = $parts[2] . ($parts[3] ?? '');
@@ -194,15 +185,24 @@ final class Values
         if (!is_string($value) || str_starts_with($value, '0000-')
             || !preg_match('/\A\d{4}-\d{2}-\d{2}(?:[ T](?:[01]\d|2[0-3]):[0-5]\d(?::[0-5]\d)?(?:Z|[+-](?:[01]\d|2[0-3]):[0-5]\d)?)?\z/', $value))
         {
-            throw new SyncException('invalid_field_value', 422);
+            throw (new SyncException('invalid_field_value', 422))
+                ->because('The value must use YYYY-MM-DD or an ISO date and time.');
         }
 
         $utc = new DateTimeZone('UTC');
-        $date = new DateTimeImmutable($value, $utc);
-        $errors = DateTimeImmutable::getLastErrors();
-        if ($errors !== false && ($errors['warning_count'] > 0 || $errors['error_count'] > 0))
+        try
         {
-            throw new SyncException('invalid_field_value', 422);
+            $date = new DateTimeImmutable($value, $utc);
+        }
+        catch (\Exception)
+        {
+            // A string can match the format pattern even when PHP cannot parse the date.
+            $date = null;
+        }
+        $errors = DateTimeImmutable::getLastErrors();
+        if ($date === null || ($errors !== false && ($errors['warning_count'] > 0 || $errors['error_count'] > 0)))
+        {
+            throw (new SyncException('invalid_field_value', 422))->because('The calendar date or time is invalid.');
         }
         return $withTime ? $date->setTimezone($utc)->format('Y-m-d H:i:s') : $date->format('Y-m-d');
     }
@@ -221,7 +221,7 @@ final class Values
         $labels = is_array($value) && array_is_list($value) ? $value : [$value];
         if (!$multiple && count($labels) > 1)
         {
-            throw new SyncException('invalid_field_value', 422);
+            throw (new SyncException('invalid_field_value', 422))->because('This dropdown accepts one option.');
         }
 
         $ids = [];
@@ -230,7 +230,8 @@ final class Values
             // Even for numeric labels, only look up the option by name.
             if (!is_string($label) || trim($label) === '')
             {
-                throw new SyncException('invalid_field_value', 422);
+                throw (new SyncException('invalid_field_value', 422))
+                    ->because('Dropdown choices must be submitted as non-empty text labels.');
             }
             $row = self::findChoice($field['dropdown_itemtype'] ?? null, $entityId, trim($label), null, null, false, $field['dropdown_criteria'] ?? []);
             $ids[] = (int) $row['id'];
@@ -250,7 +251,8 @@ final class Values
             $value = json_decode($value, true);
             if (!is_array($value) || !array_is_list($value))
             {
-                throw new SyncException('reference_unavailable', 422);
+                throw (new SyncException('reference_unavailable', 422))
+                    ->because('GLPI B could not read the dropdown options stored for this field.');
             }
         }
 
@@ -283,7 +285,8 @@ final class Values
             || (isset($value['serial']) && !is_string($value['serial']))
             || (trim($value['label']) === '' && trim($value['serial'] ?? '') === ''))
         {
-            throw new SyncException('invalid_field_value', 422);
+            throw (new SyncException('invalid_field_value', 422))
+                ->because('This linked record needs an item type and a name or serial number.');
         }
 
         $type = $value['itemtype'];
@@ -316,7 +319,8 @@ final class Values
     {
         if (!in_array($type, $field['allowed_itemtypes'] ?? [], true))
         {
-            throw new SyncException('reference_unavailable', 422);
+            throw (new SyncException('reference_unavailable', 422))
+                ->because('The linked record type is unavailable for this field.');
         }
     }
 
@@ -334,7 +338,8 @@ final class Values
         {
             return '';
         }
-        throw new SyncException('reference_unavailable', 422);
+        throw (new SyncException('reference_unavailable', 422))
+            ->because('The matching option or linked record has no usable name.');
     }
 
     private static function findChoice(
@@ -374,7 +379,8 @@ final class Values
         {
             if ($label === null || trim($label) === '')
             {
-                throw new SyncException('reference_unavailable', 422);
+                throw (new SyncException('reference_unavailable', 422))
+                    ->because('GLPI B needs a name or serial number to look up this option or record.');
             }
             if ($DB->fieldExists($table, 'completename'))
             {
@@ -434,7 +440,8 @@ final class Values
         {
             $match = self::uniqueChoice($model, $where, $checkRead);
         }
-        return $match ?? throw new SyncException('reference_unavailable', 422);
+        return $match ?? throw (new SyncException('reference_unavailable', 422))
+            ->because('GLPI B could not find a matching option or linked record visible in the destination entity.');
     }
 
     private static function uniqueChoice(CommonDBTM $model, array $where, bool $checkRead): ?array
@@ -451,7 +458,8 @@ final class Values
             }
             if ($match !== null)
             {
-                throw new SyncException('reference_unavailable', 422);
+                throw (new SyncException('reference_unavailable', 422))
+                    ->because('GLPI B found multiple matching options or linked records in the destination entity.');
             }
             $match = $row;
         }

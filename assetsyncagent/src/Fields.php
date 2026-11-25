@@ -30,14 +30,17 @@ final class AssetSyncFields
             || ($descriptor['table'] ?? null) !== ($option['table'] ?? null)
             || ($descriptor['field'] ?? null) !== ($option['field'] ?? null))
         {
-            throw new SyncException('field_unavailable', 422);
+            // Controller A can still identify this stale mapping by the requested ID.
+            throw (new SyncException('field_unavailable', 422))->forField(['id' => $id])
+                ->because('The saved mapping no longer matches an available search option on GLPI B.');
         }
         // The REST API adds its own UID. Names and source labels can be translated.
         foreach (['linkfield', 'datatype'] as $key)
         {
             if (array_key_exists($key, $descriptor) && $descriptor[$key] !== ($option[$key] ?? ''))
             {
-                throw new SyncException('field_unavailable', 422);
+                throw (new SyncException('field_unavailable', 422))->forField(['id' => $id])
+                    ->because('The saved mapping no longer matches the current search option on GLPI B.');
             }
         }
 
@@ -50,39 +53,48 @@ final class AssetSyncFields
             $pluginFieldId = $this->options[$id - 1]['pfields_fields_id'] ?? null;
         }
 
-        if ($id === 200 && $option['table'] === Notepad::getTable() && $option['field'] === 'content')
+        // Keep the matched ID if local permissions or storage prevent resolving the field.
+        try
         {
-            if (!Session::haveRight($this->asset::$rightname, READNOTE))
+            if ($id === 200 && $option['table'] === Notepad::getTable() && $option['field'] === 'content')
             {
-                throw new SyncException('field_unavailable', 422);
+                if (!Session::haveRight($this->asset::$rightname, READNOTE))
+                {
+                    throw new SyncException('field_unavailable', 422);
+                }
+                $field = [
+                    'column' => 'content',
+                    'table' => Notepad::getTable(),
+                    'source' => 'notes',
+                    'kind' => 'notes',
+                    'writable' => Session::haveRight($this->asset::$rightname, UPDATENOTE),
+                ];
             }
-            $field = [
-                'column' => 'content',
-                'table' => Notepad::getTable(),
-                'source' => 'notes',
-                'kind' => 'notes',
-                'writable' => Session::haveRight($this->asset::$rightname, UPDATENOTE),
-            ];
+            elseif ($definition instanceof CustomFieldDefinition)
+            {
+                $field = $this->nativeCustomField($definition);
+            }
+            elseif ($pluginFieldId !== null)
+            {
+                $field = $this->fieldsPluginField((int) $pluginFieldId, $option);
+            }
+            else
+            {
+                $field = $this->nativeField($option);
+            }
         }
-        elseif ($definition instanceof CustomFieldDefinition)
+        catch (SyncException $error)
         {
-            $field = $this->nativeCustomField($definition);
-        }
-        elseif ($pluginFieldId !== null)
-        {
-            $field = $this->fieldsPluginField((int) $pluginFieldId, $option);
-        }
-        else
-        {
-            $field = $this->nativeField($option);
-        }
-
-        if ($write && !$field['writable'])
-        {
-            throw new SyncException('field_read_only', 403);
+            throw $error->forField(['id' => $id])->because('GLPI B cannot use this field in the destination asset or entity.');
         }
 
         $field['id'] = $id;
+        if ($write && !$field['writable'])
+        {
+            throw (new SyncException('field_read_only', 403))->forField($field)
+                ->because('The destination field is read-only for the sync account.');
+        }
+
         $field['key'] = $field['table'] . '.' . $field['column'];
         $field['option'] = $option;
         return $field;
@@ -99,8 +111,20 @@ final class AssetSyncFields
             if (is_int($id) && ($option['table'] ?? null) === $this->asset::getTable()
                 && ($option['field'] ?? null) === $column && empty($option['nodisplay']))
             {
-                $field = $this->resolve(['id' => $id, 'table' => $option['table'], 'field' => $column]);
-                return $field['writable'] && $field['source'] === 'native' ? $field : null;
+                try
+                {
+                    $field = $this->resolve(['id' => $id, 'table' => $option['table'], 'field' => $column]);
+                }
+                catch (SyncException $error)
+                {
+                    throw $error->forField(['seed_column' => $column]);
+                }
+                if (!$field['writable'] || $field['source'] !== 'native')
+                {
+                    return null;
+                }
+                $field['seed_column'] = $column;
+                return $field;
             }
         }
         return null;
@@ -329,6 +353,7 @@ final class AssetSyncFields
             'writable' => $writable && empty($settings['is_readonly']),
             'required' => !empty($settings['mandatory']),
             'container' => $containerId,
+            'container_label' => trim((string) ($container->fields['label'] ?? '')),
             'model' => $model,
             'definition' => $definition->fields,
         ];
@@ -421,10 +446,25 @@ final class AssetSyncFields
         if ($field['kind'] === 'datetime' && is_string($value) && $value !== '' && !str_starts_with($value, '0000-00-00'))
         {
             // GLPI native fields and display models operate in the active GLPI timezone.
-            $value = (new DateTimeImmutable($value))->setTimezone(new DateTimeZone('UTC'))->format('Y-m-d H:i:s');
+            try
+            {
+                $value = (new DateTimeImmutable($value))->setTimezone(new DateTimeZone('UTC'))->format('Y-m-d H:i:s');
+            }
+            catch (Exception)
+            {
+                throw (new SyncException('invalid_field_value', 422))->forField($field)
+                    ->because('GLPI B could not read the stored date and time for this field.');
+            }
         }
 
-        $snapshot = Values::decode($field, $value, $this->entityId);
+        try
+        {
+            $snapshot = Values::decode($field, $value, $this->entityId);
+        }
+        catch (SyncException $error)
+        {
+            throw $error->forField($field)->because('GLPI B could not interpret the stored value of this field.');
+        }
         $snapshot['modified_at'] = $this->lastEdit($field);
         return $snapshot;
     }
@@ -514,7 +554,8 @@ final class AssetSyncFields
         if ($this->asset->dohistory
             && !History::recordField($this->asset, $this->historyId($field), $field, $before, $after, $initial))
         {
-            throw new SyncException('field_write_failed', 500);
+            throw (new SyncException('field_write_failed', 500))->forField($field)
+                ->because('GLPI B could not record the field change in the asset history.');
         }
     }
 
@@ -522,20 +563,30 @@ final class AssetSyncFields
     {
         if (!$field['writable'])
         {
-            throw new SyncException('field_read_only', 403);
+            throw (new SyncException('field_read_only', 403))->forField($field)
+                ->because('The destination field is read-only for the sync account.');
         }
-        if ($field['source'] === 'notes')
+        try
         {
-            // Notes are separate records. Keep destination notes and plan only additions.
-            $notes = Notes::normalize(array_merge(Notes::read($this->asset, true)['value'], Notes::normalize($value)));
-            return $notes;
+            if ($field['source'] === 'notes')
+            {
+                // Notes are separate records. Keep destination notes and plan only additions.
+                $notes = Notes::normalize(array_merge(Notes::read($this->asset, true)['value'], Notes::normalize($value)));
+                return $notes;
+            }
+
+            $raw = Values::encode($field, $value, $this->entityId);
+            $portable = Values::decode($field, $raw, $this->entityId)['value'];
+        }
+        catch (SyncException $error)
+        {
+            throw $error->forField($field)->because('GLPI B could not prepare the submitted value for this field.');
         }
 
-        $raw = Values::encode($field, $value, $this->entityId);
-        $portable = Values::decode($field, $raw, $this->entityId)['value'];
         if (!empty($field['required']) && ($portable === null || $portable === '' || $portable === []))
         {
-            throw new SyncException('invalid_field_value', 422);
+            throw (new SyncException('invalid_field_value', 422))->forField($field)
+                ->because('The destination field is required and the submitted value is empty.');
         }
         if ($field['kind'] === 'datetime' && is_string($raw) && $raw !== '')
         {
@@ -560,17 +611,21 @@ final class AssetSyncFields
         foreach ($containers as $containerId => $writes)
         {
             $input = $this->containerCriteria($containerId);
+            $fields = array_column($writes, 'field');
+            $group = ($fields[0]['container_label'] ?? '') ?: "Fields container #$containerId";
             foreach ($writes as ['field' => $field, 'raw' => $raw, 'value' => $portable])
             {
                 // Recheck status-dependent rules after any native status change in this request.
                 $settings = $this->fieldsPluginSettings($containerId, $field['definition']);
                 if (!empty($settings['is_readonly']))
                 {
-                    throw new SyncException('field_read_only', 403);
+                    throw (new SyncException('field_read_only', 403))->forField($field)
+                        ->because('The destination field is read-only for the asset’s current status.');
                 }
                 if (!empty($settings['mandatory']) && ($portable === null || $portable === '' || $portable === []))
                 {
-                    throw new SyncException('invalid_field_value', 422);
+                    throw (new SyncException('invalid_field_value', 422))->forField($field)
+                        ->because('The asset’s current status requires a value in this field.');
                 }
                 if ($field['kind'] === 'reference')
                 {
@@ -584,7 +639,9 @@ final class AssetSyncFields
             }
             if (!PluginFieldsContainer::validateValues($input, $this->asset::class, true))
             {
-                throw new SyncException('invalid_field_value', 422);
+                // The Fields validator returns one result for the entire container.
+                throw (new SyncException('invalid_field_value', 422))->forGroup($group, $fields)
+                    ->because('The Fields plugin rejected this group during validation.');
             }
             foreach ($writes as ['field' => $field, 'raw' => $raw])
             {
@@ -597,7 +654,7 @@ final class AssetSyncFields
 
             // updateFieldsValues() in Fields ignores its model's add/update return value.
             // Use the same validation and model directly so failed writes can be rolled back.
-            $model = new ($field['model'])();
+            $model = new ($fields[0]['model'])();
             if ($model->getFromDBByCrit($this->containerCriteria($containerId)))
             {
                 $input['id'] = $model->getID();
@@ -609,11 +666,12 @@ final class AssetSyncFields
             }
             if (!$written)
             {
-                throw new SyncException('field_write_failed', 422);
+                throw (new SyncException('field_write_failed', 422))->forGroup($group, $fields)
+                    ->because('The Fields plugin could not save the values for this group.');
             }
 
             // Refresh the locked row so the transaction can verify the persisted values.
-            $this->lockContainers(array_column($writes, 'field'));
+            $this->lockContainers($fields);
         }
     }
 }

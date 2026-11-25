@@ -66,9 +66,7 @@ final class Request extends APIRest
         }
         catch (SyncException $exception)
         {
-            $details = $includeErrorDetails && $exception->getFieldId() !== null
-                ? ['field_id' => $exception->getFieldId()]
-                : [];
+            $details = $includeErrorDetails ? $exception->getDetails() : [];
             return self::error($exception->getMessage(), $exception->getCode(), details: $details);
         }
         catch (Throwable)
@@ -130,9 +128,9 @@ final class Request extends APIRest
             catch (SyncException $exception)
             {
                 $result += ['ok' => false, 'error' => $exception->getMessage()];
-                if (($item['include_error_details'] ?? false) === true && $exception->getFieldId() !== null)
+                if (($item['include_error_details'] ?? false) === true)
                 {
-                    $result['field_id'] = $exception->getFieldId();
+                    $result += $exception->getDetails();
                 }
             }
             catch (Throwable)

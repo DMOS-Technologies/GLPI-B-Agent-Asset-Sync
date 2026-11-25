@@ -14,7 +14,7 @@ final class Notes
     {
         if (!is_array($value) || !array_is_list($value))
         {
-            throw new SyncException('invalid_field_value', 422);
+            throw (new SyncException('invalid_field_value', 422))->because('This field expects a list of notes.');
         }
 
         $bodies = [];
@@ -22,7 +22,7 @@ final class Notes
         {
             if (!is_string($body))
             {
-                throw new SyncException('invalid_field_value', 422);
+                throw (new SyncException('invalid_field_value', 422))->because('Each submitted note must contain text.');
             }
             $body = $body === '0' ? $body : RichText::getSafeHtml($body);
             // Embedded images and GLPI document links use identifiers local to the source.

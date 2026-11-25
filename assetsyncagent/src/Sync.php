@@ -223,7 +223,8 @@ final class Sync
             {
                 if (!is_string($column) || ($value !== null && !is_scalar($value)))
                 {
-                    throw new SyncException('invalid_field_value', 422);
+                    throw (new SyncException('invalid_field_value', 422))
+                        ->because('Native asset fields must be submitted by column name with a single value per column.');
                 }
                 if ($value === null || $value === '')
                 {
@@ -257,27 +258,41 @@ final class Sync
         }
 
         $native = [];
+        $nativeFields = [];
         $containers = [];
         $notes = [];
+        $notesField = null;
         $planned = [];
         foreach ($writes as $key => $entry)
         {
-            $planned[$key] = $fields->plan($entry['field'], $entry['value'], $native, $containers, $notes);
+            $field = $entry['field'];
+            $planned[$key] = $fields->plan($field, $entry['value'], $native, $containers, $notes);
+            if ($field['source'] === 'native' || $field['source'] === 'custom')
+            {
+                $nativeFields[] = $field;
+            }
+            elseif ($field['source'] === 'notes')
+            {
+                $notesField = $field;
+            }
         }
 
         // Record sync history below, where a failed audit write can roll back the apply.
+        // The native GLPI model reports one result for all submitted columns.
         if ($create)
         {
             $id = $asset->add(['entities_id' => $entity, 'serial' => $serial, '_skip_rules' => true] + $native, [], false);
             if (!$id)
             {
-                throw new SyncException('invalid_field_value', 422);
+                throw (new SyncException('invalid_field_value', 422))->forGroup('Native asset fields', $nativeFields)
+                    ->because('GLPI B declined to create the asset using the submitted native fields.');
             }
             $id = (int) $id;
         }
         elseif ($native !== [] && !$asset->update(['id' => $id, '_skip_rules' => true] + $native, false))
         {
-            throw new SyncException('invalid_field_value', 422);
+            throw (new SyncException('invalid_field_value', 422))->forGroup('Native asset fields', $nativeFields)
+                ->because('GLPI B declined to update the asset using the submitted native fields.');
         }
 
         $storedSerial = $create ? $serial : $before['serial'];
@@ -287,9 +302,16 @@ final class Sync
             throw new SyncException('asset_identity_changed', 409);
         }
         $fields->saveContainers($containers);
-        if ($notes !== [])
+        if ($notes !== [] && $notesField !== null)
         {
-            Notes::addMissing($asset, $notes);
+            try
+            {
+                Notes::addMissing($asset, $notes);
+            }
+            catch (SyncException $error)
+            {
+                throw $error->forField($notesField)->because('GLPI B could not add a note to this asset.');
+            }
         }
 
         if (!$create)
@@ -310,7 +332,8 @@ final class Sync
             $storedValue = $fields->read($entry['field'])['value'];
             if ($storedValue !== $planned[$key])
             {
-                throw new SyncException('invalid_field_value', 422);
+                throw (new SyncException('invalid_field_value', 422))->forField($entry['field'])
+                    ->because('The value stored by GLPI B differs from the value it was expected to save.');
             }
             if (isset($mapped[$key]))
             {
@@ -406,7 +429,8 @@ final class Sync
             }
             if ($write && !$field['writable'])
             {
-                throw new SyncException('field_read_only', 403);
+                throw (new SyncException('field_read_only', 403))->forField($field)
+                    ->because('The destination field is read-only for the sync account.');
             }
             if (isset($resolved[$field['key']]))
             {
