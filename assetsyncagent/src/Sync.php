@@ -78,7 +78,10 @@ final class Sync
 
         if ($operation === 'probe')
         {
-            return self::transaction(static fn() => self::probe($asset, $entity, $lookup, self::getList($request, 'fields')));
+            $allowUnresolvedDropdown = ($request['include_unresolved_dropdowns'] ?? false) === true;
+            return self::transaction(static fn() => self::probe(
+                $asset, $entity, $lookup, self::getList($request, 'fields'), $allowUnresolvedDropdown
+            ));
         }
 
         // Use the scope as the lock key so equivalent serials under the DB collation share a lock.
@@ -134,7 +137,7 @@ final class Sync
         return $row === null ? null : (int) $row['id'];
     }
 
-    private static function probe(CommonDBTM $asset, int $entity, string $lookup, array $descriptors): array
+    private static function probe(CommonDBTM $asset, int $entity, string $lookup, array $descriptors, bool $allowUnresolvedDropdown): array
     {
         $id = self::findId($lookup);
         if ($id === null)
@@ -158,7 +161,7 @@ final class Sync
             $field = $fields->resolve($descriptor);
             if ($id !== null)
             {
-                $values[$descriptor['id']] = $fields->read($field);
+                $values[$descriptor['id']] = $fields->read($field, $allowUnresolvedDropdown);
             }
         }
         if ($id === null)
@@ -248,9 +251,21 @@ final class Sync
         if (!$create)
         {
             $fields->lockContainers(array_column($writes + $expected, 'field'));
-            foreach ($expected as $entry)
+            foreach ($expected as $key => $entry)
             {
-                if ($fields->read($entry['field'])['value'] !== $entry['value'])
+                $expectsUnresolvedDropdown = Values::isUnresolvedDropdown($entry['value']);
+                if ($expectsUnresolvedDropdown)
+                {
+                    $replacement = $writes[$key]['value'] ?? null;
+                    if ($entry['field']['kind'] !== 'dropdown' || !is_string($replacement) || trim($replacement) === '')
+                    {
+                        throw (new SyncException('invalid_field_value', 422))->forField($entry['field'])
+                            ->because('An unavailable dropdown option requires a non-empty replacement label.');
+                    }
+                }
+
+                // Recheck the exact unresolved option under the same lock as the replacement.
+                if ($fields->read($entry['field'], $expectsUnresolvedDropdown)['value'] !== $entry['value'])
                 {
                     throw new SyncException('asset_changed', 409);
                 }

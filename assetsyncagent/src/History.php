@@ -60,6 +60,10 @@ final class History
         {
             $value = $value ? __('Yes') : __('No');
         }
+        elseif ($kind === 'dropdown' && Values::isUnresolvedDropdown($value))
+        {
+            $value = __('(unavailable option)', 'assetsyncagent');
+        }
         elseif (is_array($value))
         {
             $value = $value['label'] ?? implode(', ', $value);

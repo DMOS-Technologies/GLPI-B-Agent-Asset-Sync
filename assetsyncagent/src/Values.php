@@ -38,12 +38,12 @@ final class Values
         return self::scalar($field, $kind, $value, true);
     }
 
-    public static function decode(array $field, mixed $value, int $entityId): array
+    public static function decode(array $field, mixed $value, int $entityId, bool $allowUnresolvedDropdown = false): array
     {
         $kind = self::kind($field);
         if ($kind === 'dropdown' || $kind === 'dropdown_list')
         {
-            $value = self::decodeDropdown($field, $kind, $value, $entityId);
+            $value = self::decodeDropdown($field, $kind, $value, $entityId, $allowUnresolvedDropdown);
         }
         elseif ($kind === 'item')
         {
@@ -60,6 +60,13 @@ final class Values
         }
 
         return ['value' => $value, 'kind' => $kind];
+    }
+
+    public static function isUnresolvedDropdown(mixed $value): bool
+    {
+        return is_array($value) && count($value) === 1
+            && is_string($value['unresolved_dropdown'] ?? null)
+            && preg_match('/\A[0-9a-f]{64}\z/', $value['unresolved_dropdown']) === 1;
     }
 
     private static function kind(array $field): string
@@ -239,7 +246,7 @@ final class Values
         return $multiple ? array_values(array_unique($ids)) : ($ids[0] ?? 0);
     }
 
-    private static function decodeDropdown(array $field, string $kind, mixed $value, int $entityId): mixed
+    private static function decodeDropdown(array $field, string $kind, mixed $value, int $entityId, bool $allowUnresolvedDropdown): mixed
     {
         $multiple = $kind === 'dropdown_list';
         if ($value === null || $value === '')
@@ -257,6 +264,10 @@ final class Values
         }
 
         $type = $field['dropdown_itemtype'] ?? null;
+        // Only a stored, positive single-select ID can be replaced using an unresolved marker.
+        $allowMissingChoice = $allowUnresolvedDropdown && !$multiple && $type !== Entity::class
+            && (is_int($value) || is_string($value)) && (int) $value > 0
+            && (string) (int) $value === (string) $value;
         $labels = [];
         foreach (is_array($value) ? $value : [$value] as $id)
         {
@@ -264,7 +275,13 @@ final class Values
             {
                 continue;
             }
-            $row = self::findChoice($type, $entityId, null, (int) $id, null, false, $field['dropdown_criteria'] ?? []);
+            $row = self::findChoice(
+                $type, $entityId, null, (int) $id, null, false, $field['dropdown_criteria'] ?? [], $allowMissingChoice
+            );
+            if ($row === null)
+            {
+                return ['unresolved_dropdown' => hash('sha256', (string) (int) $id)];
+            }
             $labels[] = self::choiceLabel($type, $row);
         }
         return $multiple ? $labels : ($labels[0] ?? null);
@@ -349,8 +366,9 @@ final class Values
         ?int $id,
         ?string $serial,
         bool $itemReference,
-        array $extraCriteria = []
-    ): array
+        array $extraCriteria = [],
+        bool $allowMissingDropdown = false
+    ): ?array
     {
         global $DB;
 
@@ -440,8 +458,13 @@ final class Values
         {
             $match = self::uniqueChoice($model, $where, $checkRead);
         }
-        return $match ?? throw (new SyncException('reference_unavailable', 422))
-            ->because('GLPI B could not find a matching option or linked record visible in the destination entity.');
+        // Permission-checked models may miss because of access rights, which is a strict error.
+        if ($match === null && (!$allowMissingDropdown || $checkRead))
+        {
+            throw (new SyncException('reference_unavailable', 422))
+                ->because('GLPI B could not find a matching option or linked record visible in the destination entity.');
+        }
+        return $match;
     }
 
     private static function uniqueChoice(CommonDBTM $model, array $where, bool $checkRead): ?array

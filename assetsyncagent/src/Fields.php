@@ -407,7 +407,7 @@ final class AssetSyncFields
         ];
     }
 
-    public function read(array $field): array
+    public function read(array $field, bool $allowUnresolvedDropdown = false): array
     {
         global $DB;
 
@@ -428,6 +428,8 @@ final class AssetSyncFields
             if (!$row && $field['kind'] !== 'reference')
             {
                 $value = PluginFieldsField::getDefaultValue($field['definition']);
+                // A missing default option is a configuration error and has no stored ID to replace.
+                $allowUnresolvedDropdown = false;
             }
             if ($field['kind'] === 'reference')
             {
@@ -459,7 +461,7 @@ final class AssetSyncFields
 
         try
         {
-            $snapshot = Values::decode($field, $value, $this->entityId);
+            $snapshot = Values::decode($field, $value, $this->entityId, $allowUnresolvedDropdown);
         }
         catch (SyncException $error)
         {
